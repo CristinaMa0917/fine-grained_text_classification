@@ -19,7 +19,7 @@ def parse_args():
     parser.add_argument("--mode", type=int, help = "1:train 0:test")
     parser.add_argument("--max_steps", type=int, help="Number of iterations before stopping")
     parser.add_argument("--checkpoint_dir", type=str, help="Path of the checkpoint path")
-    parser.add_argument("--kid_classes", type=int, default=2)
+    parser.add_argument("--classes", type=int, default=2)
     parser.add_argument("--hidden_size", type=str, default="50")
     parser.add_argument("--learning_rate", type=float, default=0.001)
     parser.add_argument("--query_length", type=int, default=20)
@@ -52,8 +52,8 @@ def main():
             dim_word_embedding=args.word_dimension,
             init_with_w2v=False,
             hidden_layers=args.hidden_size,
-            word_count=args.word_count,
-            kid_count=args.kid_classes
+            classes=args.classes,
+            word_count=args.word_count
         ),
         train_configs=model.TrainConfigs(
             learning_rate=args.learning_rate

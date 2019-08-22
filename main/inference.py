@@ -116,8 +116,9 @@ def main():
             dim_word_embedding=model_args.word_dimension,
             init_with_w2v=False,
             hidden_layers=model_args.hidden_size,
-            kid_count=model_args.kid_classes,
-            word_count=model_args.word_count
+            classes=model_args.classes,
+            word_count=model_args.word_count,
+
         ),
         train_configs=None,
         predict_configs=model.PredictConfigs(

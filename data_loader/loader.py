@@ -20,13 +20,13 @@ class OdpsDataLoader:
         return tf.string_to_number(word_strs.values, out_type=tf.int64)[:max_length]+ (1 if shift_no else 0), \
                tf.ones([tf.minimum(tf.shape(word_strs)[-1], max_length)])
 
-    def _train_data_parser(self, oneid, content, kid_label, par_label):
+    def _train_data_parser(self, oneid, content, label):
         words, masks = self._text_content_parser(content, self._max_length)
         return {
             "oneid": oneid,
             "words": words,
             "masks": masks
-        }, {"kid_labels":kid_label, "par_labels":par_label}
+        }, label
 
     def _test_data_parser(self, oneid, content):
         words, masks = self._text_content_parser(content, self._max_length)
@@ -34,13 +34,13 @@ class OdpsDataLoader:
                    "oneid": oneid,
                    "words": words,
                    "masks": masks
-               }, tf.constant(0, dtype=tf.int32) # fake label
+               }, tf.constant(0, dtype=tf.int32)  # fake label
 
     def _train_data_fn(self):
         with tf.device("/cpu:0"):
             dataset = tf.data.TableRecordDataset(
                 self._table_name,
-                record_defaults=["", "", 0, 0],
+                record_defaults=["", "", 0],
                 slice_id=self._slice_id,
                 slice_count=self._slice_count
             )
@@ -60,11 +60,7 @@ class OdpsDataLoader:
                         "oneid": [],
                         "words": [self._max_length],
                         "masks": [self._max_length],
-                    },
-                    {
-                        "kid_labels":[],
-                        "par_labels":[]
-                    })
+                    }, [])
             )
 
             return dataset.make_one_shot_iterator().get_next()

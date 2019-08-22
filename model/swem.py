@@ -42,6 +42,44 @@ class _WordEmbeddingEncoder:
         with tf.variable_scope(self._scope_name, reuse=tf.AUTO_REUSE):
             return tf.nn.embedding_lookup(self._word_embedding, tokens)
 
+class _CateEmbeddingEncoder:
+    def __init__(self, cate_count=12764, dimension=100, training=1, scope_name='cate-id-encoder', *args, **kwargs):
+        training = training
+        self._scope_name = scope_name
+
+        with tf.variable_scope(scope_name, reuse=False):
+            self._word_embedding = tf.get_variable(
+                "WordEmbedding",
+                [cate_count + 1, dimension],
+                dtype=tf.float32,
+                initializer=tf.contrib.layers.xavier_initializer(),
+                trainable=training
+            )
+
+    def __call__(self, tokens):
+        """
+        获得句子的embedding
+        :param tokens: batch_size * max_seq_len
+        :param masks: batch_size * max_seq_len
+        :return:
+        """
+        with tf.variable_scope(self._scope_name, reuse=tf.AUTO_REUSE):
+            return tf.nn.embedding_lookup(self._word_embedding, tokens)
+
+class _MaxPooling:
+    def __init__(self, **kwargs):
+        pass
+
+    def __call__(self, embeddings, masks):
+        # batch * length * 1
+        multiplier = tf.expand_dims(masks, axis=-1)
+        embeddings_max = tf.reduce_max(
+            tf.multiply(multiplier, embeddings),
+            axis=1
+        )
+        return embeddings_max
+
+
 class _AveragePooling:
     def __init__(self, **kwargs):
         pass
@@ -58,6 +96,7 @@ class _AveragePooling:
 
         embedding_avg = embeddings_sum / length
         return embedding_avg
+
 
 class _ConcatPooling:
     def __init__(self, **kwargs):
@@ -76,28 +115,18 @@ class _ConcatPooling:
         return embeddings
 
 class _MlpTransformer(object):
-    def __init__(self, layers, dropout, training, kid_count, scope_name):
+    def __init__(self, layers, dropout, training, scope_name):
         self._layers = layers
         self._training = training
         self._dropout = dropout
         self._scope = tf.variable_scope(scope_name)
-        self._parent_index, self.par_count = self._cate_relation_loader()
-        self.kid_count = kid_count
 
-    def _cate_relation_loader(self, file_name='model/par_index.txt'):
-        parent_index = []
-        with open(file_name, 'r') as f:
-            for line in f.readlines():
-                line = line.strip('\n')
-                parent_index.append(int(line))
-        par_count = max(parent_index)+1
-        return parent_index, par_count
-
-    def __call__(self, input): # c,100;
+    def __call__(self, input, cate_id_emb, cate_name_emb, cate_masks): # c,100; c, s, 100
         with self._scope as scope:
             values = input
-            for i, n_units in enumerate(self._layers, 1):
-                with tf.variable_scope("ParMlpLayer-%d" % i) as hidden_layer_scope:
+
+            for i, n_units in enumerate(self._layers[:-1], 1):
+                with tf.variable_scope("MlpLayer-%d" % i) as hidden_layer_scope:
                     values = layers.fully_connected(
                         values, num_outputs=n_units, activation_fn=tf.nn.tanh,
                         scope=hidden_layer_scope, reuse=tf.AUTO_REUSE
@@ -105,33 +134,40 @@ class _MlpTransformer(object):
                 if self._training and self._dropout > 0:
                     print("In training mode, use dropout")
                     values = tf.nn.dropout(values, keep_prob=1 - self._dropout)
-            logits_par = layers.linear(values, self.par_count, scope="f-par-{}".format(i), reuse=tf.AUTO_REUSE)
 
-            values = input
-            for i, n_units in enumerate(self._layers, 1):
-                with tf.variable_scope("KidMlpLayer1-%d" % i) as hidden_layer_scope:
-                    values = layers.fully_connected(
-                        values, num_outputs=n_units, activation_fn=tf.nn.tanh,
+            cate_name_emb = tf.reduce_max(tf.multiply(tf.expand_dims(tf.cast(cate_masks,tf.float32),-1), cate_name_emb), axis=1) # c,e
+            cate_emb = tf.concat([cate_id_emb, cate_name_emb], axis = 1) # c,2e
+
+            for i, n_units in enumerate(self._layers[:-1], 1):
+                with tf.variable_scope("MlpLayer1-%d" % i) as hidden_layer_scope:
+                    cate_emb = layers.fully_connected(
+                        cate_emb, num_outputs=n_units, activation_fn=tf.nn.tanh,
                         scope=hidden_layer_scope, reuse=tf.AUTO_REUSE
                     )
                 if self._training and self._dropout > 0:
                     print("In training mode, use dropout")
                     values = tf.nn.dropout(values, keep_prob=1 - self._dropout)
-            logits_kid_pre = layers.linear(values, self.kid_count, scope="f-kid-{}".format(i), reuse=tf.AUTO_REUSE)
 
-            logits_par_transpose = tf.transpose(logits_par, [1, 0])
-            logits_kid_from_par = tf.nn.embedding_lookup(logits_par_transpose, self._parent_index)
-            logits_kid_from_par_trans = tf.transpose(logits_kid_from_par, [1, 0])
-            logits_kid = logits_kid_from_par_trans + logits_kid_pre
-            return logits_par, logits_kid
+            bias = tf.get_variable(
+                    name = 'b',
+                    shape=self._layers[-1],
+                    trainable = self._training,
+                    initializer= tf.constant_initializer(0)
+            )
+            return tf.matmul(values, tf.transpose(cate_emb,[1,0]))+bias, 0
 
 class _Model:
-    def __init__(self, word_encoder, pooling, dropout, layers, training, scope_name, kid_count,  focal_loss = True):
+    def __init__(self, word_encoder, cate_encoder, pooling, dropout, layers, training, scope_name, focal_loss = True):
         self._scope = tf.variable_scope(scope_name, reuse=tf.AUTO_REUSE)
         self._word_encoder = word_encoder
+        self._cate_encoder = cate_encoder
         self._pooling = pooling
-        self._mlp = _MlpTransformer(layers, dropout, kid_count=kid_count,  training=training, scope_name=scope_name + "_" + "MLP")
+        self._mlp = _MlpTransformer(layers, dropout, training=training, scope_name=scope_name + "_" + "MLP")
         self._focal = focal_loss
+        self.cates, self.cate_masks = self._cate_loader()
+        self.cate_name_embs = self._word_encoder(self.cates)
+        self.cate_id_embs = self._cate_encoder(np.arange(12764))
+
 
     def _focal_loss(self, logits, labels, gamma=3):
         logits = tf.nn.softmax(logits, -1)
@@ -141,53 +177,62 @@ class _Model:
         loss = tf.reduce_mean(L)
         return loss
 
-    def __call__(self, query, mask, kid_labels, par_labels):
+    def _cate_loader(self, file_name = 'model/cate_indx.txt', cate_length = 10):
+        cates = []
+        with open(file_name, 'r') as f:
+            for line in f.readlines():
+                line = line.strip('\n')
+                cates.append(line)
+        cate_strs = []
+        masks = []
+        for item in cates:
+            cate_temp = np.fromstring(item, sep=",", dtype=int).tolist()
+            cate_init = [0] * cate_length
+            mask_init = [0] * cate_length
+            for i in range(len(cate_temp)):
+                cate_init[i] += cate_temp[i]
+                mask_init[i] += 1
+            cate_strs.append(cate_init)
+            masks.append(mask_init)
+        cate_strs = tf.convert_to_tensor(cate_strs)
+        masks = tf.convert_to_tensor(masks)
+        return cate_strs, masks
+
+    def __call__(self, query, mask, labels):
         with self._scope:
             word_embs = self._word_encoder(query)
             sentence_embeddings = self._pooling(word_embs, mask)
-            logits_par, logits_kid = self._mlp(input=sentence_embeddings)
-            prob_kid = tf.nn.softmax(logits_kid, dim = 1)
-            pred_kid = tf.argmax(prob_kid, dimension = 1)
-            prob_par = tf.nn.softmax(logits_par, dim = 1)
-            pred_par = tf.argmax(prob_par, dimension = 1)
+            logits, features = self._mlp(
+                            input=sentence_embeddings,
+                            cate_id_emb = self.cate_id_embs,
+                            cate_masks = self.cate_masks,
+                            cate_name_emb = self.cate_name_embs)
+            prob = tf.nn.softmax(logits, dim =1)
+            prediction = tf.argmax(prob, dimension=1)
 
             loss = None
-            loss1 = None
-            loss2 = None
-            if kid_labels is not None:
+            if labels is not None:
                 if self._focal :
-                    loss1 = self._focal_loss(logits_par, par_labels, 5)
-                    loss2 = self._focal_loss(logits_kid, kid_labels, 5)
-                    loss = loss1 + loss2
+                    loss = self._focal_loss(logits , labels, 5)
                 else:
-                    loss1 = tf.reduce_mean(
+                    loss = tf.reduce_mean(
                         tf.nn.sparse_softmax_cross_entropy_with_logits(
-                            logits=logits_par,
-                            labels=par_labels
+                            logits=logits,
+                            labels=labels
                         ))
-                    loss2 = tf.reduce_mean(
-                        tf.nn.sparse_softmax_cross_entropy_with_logits(
-                            logits=logits_kid,
-                            labels=kid_labels
-                        ))
-                    loss = loss1 + loss2
-
             return Namespace(
-                logit=logits_kid,
-                confidence=prob_kid,
-                feature=0,
+                logit=logits,
+                confidence=prob,
+                feature=features,
                 loss=loss,
-                loss_par=loss1,
-                loss_kid=loss2,
-                prediction_kid=pred_kid,
-                prediction_par=pred_par
+                prediction=prediction
             )
 
+
 class SWEModel:
-    ModelConfigs = namedtuple("ModelConfigs", ("pooling", "dropout",
+    ModelConfigs = namedtuple("ModelConfigs", ("pooling", "dropout", "classes",
                                                "hidden_layers", "init_with_w2v",
-                                               "dim_word_embedding","word_count",
-                                               "kid_count"))
+                                               "dim_word_embedding","word_count"))
 
     def __init__(self, model_configs, train_configs, predict_configs, run_configs):
         self._model_configs = model_configs
@@ -195,7 +240,7 @@ class SWEModel:
         self._predict_configs = predict_configs
         self._run_configs = run_configs
 
-    def _train(self, model_output, kid_labels, par_labels):
+    def _train(self, model_output, labels):
         # TODO: Add optimizer / reguliazer
         optimizer = tf.train.AdamOptimizer(learning_rate=self._train_configs.learning_rate)
         train_op = optimizer.minimize(model_output.loss, global_step=tf.train.get_global_step())
@@ -208,14 +253,9 @@ class SWEModel:
                 tf.train.LoggingTensorHook(
                     {
                         "loss": model_output.loss,
-                        "kid_acc": 100. * tf.reduce_mean(
-                            tf.cast(tf.equal(tf.cast(model_output.prediction_kid, tf.int32), tf.cast(kid_labels, tf.int32)),
+                        "accuracy": 100. * tf.reduce_mean(
+                            tf.cast(tf.equal(tf.cast(model_output.prediction, tf.int32), tf.cast(labels, tf.int32)),
                                     tf.float32)),
-                        "par_acc": 100. * tf.reduce_mean(
-                            tf.cast(tf.equal(tf.cast(model_output.prediction_par, tf.int32), tf.cast(par_labels, tf.int32)),
-                                    tf.float32)),
-                        "kid_loss":model_output.loss_kid,
-                        "par_loss":model_output.loss_par,
                         "step": tf.train.get_global_step()
                     },
                     every_n_iter=100
@@ -237,26 +277,40 @@ class SWEModel:
             outputs["confidence"] = model_output.confidence
 
         if self._predict_configs.output_prediction:
-            outputs["prediction"] = model_output.prediction_kid
+            outputs["prediction"] = model_output.prediction
 
         return tf.estimator.EstimatorSpec(
             mode=tf.estimator.ModeKeys.PREDICT,
             predictions=outputs
         )
 
-    def _evaluate(self, model_output, kid_labels):
-        return tf.estimator.EstimatorSpec(
-            mode=tf.estimator.ModeKeys.EVAL,
-            loss=model_output.loss,
-            eval_metric_ops={
-                "accuracy": tf.metrics.accuracy(kid_labels, model_output.prediction_kid),
-                "mean_per_class_accuracy": tf.metrics.mean_per_class_accuracy(kid_labels,
-                                                                              model_output.prediction_kid,
-                                                                              self._model_configs.classes)
-            }
-        )
+    def _evaluate(self, model_output, labels):
+        # 二分类评估指标
+        if self._model_configs.classes == 2:
+            return tf.estimator.EstimatorSpec(
+                mode=tf.estimator.ModeKeys.EVAL,
+                loss=model_output.loss,
+                eval_metric_ops={
+                    "accuracy": tf.metrics.accuracy(labels, model_output.prediction),
+                    "precision": tf.metrics.precision(labels, model_output.prediction),
+                    "recall": tf.metrics.recall(labels, model_output.prediction),
+                    "auc": tf.metrics.auc(labels, model_output.probability)
+                }
+            )
+        # 多分类评估指标
+        else:
+            return tf.estimator.EstimatorSpec(
+                mode=tf.estimator.ModeKeys.EVAL,
+                loss=model_output.loss,
+                eval_metric_ops={
+                    "accuracy": tf.metrics.accuracy(labels, model_output.prediction),
+                    "mean_per_class_accuracy": tf.metrics.mean_per_class_accuracy(labels,
+                                                                                  model_output.prediction,
+                                                                                  self._model_configs.classes)
+                }
+            )
 
-    def _build_model(self, features, kid_labels, par_labels, mode):
+    def _build_model(self, features, labels, mode):
         oneid = features['oneid']
         query = features['words']
         mask = features['masks']
@@ -268,9 +322,15 @@ class SWEModel:
             dimension=self._model_configs.dim_word_embedding,
             training=training,
         )
+        cate_encoder = _CateEmbeddingEncoder(
+            scope_name="c-encoder",
+            training=training,
+        )
 
         if self._model_configs.pooling == 'concat':
             word_pool = _ConcatPooling()
+        elif self._model_configs.pooling == 'max':
+            word_pool = _MaxPooling()
         elif self._model_configs.pooling == 'ave':
             word_pool = _AveragePooling()
         else:
@@ -278,35 +338,28 @@ class SWEModel:
 
         model = _Model(
             word_encoder=word_encoder,
+            cate_encoder=cate_encoder,
             pooling=word_pool,
             dropout=self._model_configs.dropout,
-            layers=[int(n) for n in self._model_configs.hidden_layers.split(",")],
+            layers=[int(n) for n in self._model_configs.hidden_layers.split(",")] + [self._model_configs.classes],
             training=training,
-            scope_name="Classification",
-            kid_count=self._model_configs.kid_count
+            scope_name="Classification"
         )
 
         model_output = model(
             query = query,
             mask = mask,
-            kid_labels = kid_labels,
-            par_labels = par_labels
+            labels = labels
         )
         model_output.oneid = oneid
         return model_output
 
     def model_fn(self, features, labels, mode):
-        if labels is not None:
-            kid_labels = labels['kid_labels']
-            par_labels = labels['par_labels']
-        else:
-            kid_labels = None
-            par_labels = None
-        model_output = self._build_model(features, kid_labels, par_labels, mode)
+        model_output = self._build_model(features, labels, mode)
 
         if mode is tf.estimator.ModeKeys.TRAIN:
-            return self._train(model_output, kid_labels, par_labels)
+            return self._train(model_output, labels)
         elif mode is tf.estimator.ModeKeys.PREDICT:
             return self._predict(model_output)
         elif mode is tf.estimator.ModeKeys.EVAL:
-            return self._evaluate(model_output, kid_labels)
+            return self._evaluate(model_output, labels)
