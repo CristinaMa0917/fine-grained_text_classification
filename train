@@ -1,0 +1,22 @@
+rm cate_prediction.tar.gz
+tar -czf cate_prediction.tar.gz ./data_dumper ./data_loader ./main ./model ./trainer ./util
+
+CHECKPOINT_PATH=query_cls/swem_kid_par1_1
+ITERATION=2000000
+DROPOUT=0.1
+WORD_DIMENSION=300
+KCLASSES=12764
+POOL=ave
+WORD_COUNT=623870
+
+echo "Checkpoint : ${CHECKPOINT_PATH};WORD_DIMENSION:${WORD_DIMENSION};POOL:${POOL}"
+odpscmd -e "use college_corp_dev;pai \
+        -name tensorflow140 -project algo_public_dev \
+        -Dscript=\"file://`pwd`/cate_prediction.tar.gz\" \
+        -Dtables=\"odps://college_corp_dev/tables/query_cls_train_net_num_kp1\" \
+        -DentryFile=\"main/train.py\" \
+        -Dbuckets=\"oss://one-graph/?host=cn-zhangjiakou.oss-internal.aliyun-inc.com\&role_arn=acs:ram::1459115138698067:role/manxiu\" \
+        -DuserDefinedParameters='--pooling=${POOL} --mode=1 --kid_classes=${KCLASSES} --hidden_size=512 --learning_rate=0.001 --query_length=30 --checkpoint_dir=manxiu/models/$CHECKPOINT_PATH --max_steps=$ITERATION --word_dimension=$WORD_DIMENSION --dropout=$DROPOUT --word_count=${WORD_COUNT}' \
+        "
+
+

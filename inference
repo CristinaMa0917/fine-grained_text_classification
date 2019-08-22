@@ -1,0 +1,18 @@
+rm cate_prediction.tar.gz
+tar -czf cate_prediction.tar.gz ./data_dumper ./data_loader ./main ./model ./trainer ./util
+
+CHECKPOINT_PATH=query_cls/swem_kid_par1_1
+STEP=1010001
+OUTPUT=query_cls_kp_pred1
+echo "Checkpoint : ${CHECKPOINT_PATH}; STEP = ${STEP}, OUTPUT:${OUTPUT}"
+
+odpscmd -e "pai \
+        -name tensorflow140 -project algo_public_dev \
+        -Dscript=\"file://`pwd`/cate_prediction.tar.gz\" \
+        -Dtables=\"odps://college_corp_dev/tables/query_cls_test_net_num_kp1\" \
+        -Doutputs=\"odps://college_corp_dev/tables/${OUTPUT}\" \
+        -DentryFile=\"main/inference.py\" \
+        -Dbuckets=\"oss://one-graph/?host=cn-zhangjiakou.oss-internal.aliyun-inc.com\&role_arn=acs:ram::1459115138698067:role/manxiu\" \
+        -DuserDefinedParameters='--checkpoint_dir=manxiu/models/$CHECKPOINT_PATH --output_prediction=1 --max_length=30 --step=${STEP}' \
+        -Dcluster='{\"worker\":{\"count\":16,\"cpu\":200,\"memory\":4096,\"gpu\":25}}' \
+        "
